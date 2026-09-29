@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+@theme {
+  --animate-shine: shine 2.5s infinite;
+  --animate-pulse-slow: pulseSlow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-neon-glow: neonGlow 2.5s ease-in-out infinite alternate;
+  
+  @keyframes shine {
+    0% {
+      left: -100%;
+    }
+    100% {
+      left: 200%;
+    }
+  }
+
+  @keyframes pulseSlow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
+
+  @keyframes neonGlow {
+    from {
+      filter: drop-shadow(0 0 4px rgba(0, 240, 255, 0.6)) drop-shadow(0 0 10px rgba(0, 240, 255, 0.3));
+    }
+    to {
+      filter: drop-shadow(0 0 8px rgba(217, 70, 239, 0.8)) drop-shadow(0 0 18px rgba(0, 240, 255, 0.5));
+    }
+  }
+}
+
+:root {
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+body {
+  background-color: #060814;
+  color: #e2e8f0;
+  overflow-x: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* Cyber & Neon decorative elements */
+.cyber-dots {
+  background-image: radial-gradient(rgba(0, 240, 255, 0.12) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.cyber-grid-lines {
+  background-size: 40px 40px;
+  background-image: 
+    linear-gradient(to right, rgba(0, 240, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 240, 255, 0.04) 1px, transparent 1px);
+}
+
+.neon-border-cyan {
+  border-color: rgba(0, 240, 255, 0.45);
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.25), inset 0 0 15px rgba(0, 240, 255, 0.08);
+}
+
+.neon-border-magenta {
+  border-color: rgba(217, 70, 239, 0.45);
+  box-shadow: 0 0 15px rgba(217, 70, 239, 0.25), inset 0 0 15px rgba(217, 70, 239, 0.08);
+}
+
+.neon-glow-cyan {
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.35);
+}
+
+.neon-glow-purple {
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.35);
+}
+
+.neon-glow-emerald {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.35);
+}
+
+.neon-badge-pulse {
+  animation: neonGlow 3s ease-in-out infinite alternate;
+}
+
+/* Custom Cyber Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 14, 28, 0.8);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 240, 255, 0.3);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 240, 255, 0.7);
+}
