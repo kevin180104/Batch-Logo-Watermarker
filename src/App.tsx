@@ -28,7 +28,8 @@ import {
   Eye,
   FolderOutput,
   Archive,
-  FolderDown
+  FolderDown,
+  FileArchive
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
@@ -42,8 +43,7 @@ export default function App() {
   const [logo, setLogo] = useState<File | null>(null);
   const [useDefaultLogo, setUseDefaultLogo] = useState<boolean>(true);
   
-  // Export mode: 'zip' or 'folder'
-  const [exportMode, setExportMode] = useState<'zip' | 'folder'>('folder');
+
 
   // Opacity state (default 60% = 0.6)
   const [opacity, setOpacity] = useState<number>(0.6);
@@ -68,11 +68,18 @@ export default function App() {
   const directoryInputRef = useRef<HTMLInputElement>(null);
   const filesInputRef = useRef<HTMLInputElement>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
+  const zipInputRef = useRef<HTMLInputElement>(null);
   const previewUrlRef = useRef<string | null>(null);
 
   // Store the writable directory handle when user selects a folder via showDirectoryPicker
   const sourceDirHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const [sourceFolderName, setSourceFolderName] = useState<string>('');
+  const [zipFileName, setZipFileName] = useState<string>('');
+  const [isAutoProcessZip, setIsAutoProcessZip] = useState<boolean>(true);
+  const [outputFolderName, setOutputFolderName] = useState<string>('');
+  const [processedResults, setProcessedResults] = useState<{ name: string; blob: Blob }[]>([]);
+  const [completedZipBlob, setCompletedZipBlob] = useState<Blob | null>(null);
+  const [completedZipName, setCompletedZipName] = useState<string>('');
 
   // Sync position string whenever anchor or padding mode changes
   useEffect(() => {
@@ -172,6 +179,18 @@ export default function App() {
     if (processState.isProcessing) return;
 
     try {
+      // 1. Kiểm tra nếu người dùng kéo thả trực tiếp file ZIP
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const filesArray = Array.from(e.dataTransfer.files) as File[];
+        const zipFile = filesArray.find(
+          f => f.name.toLowerCase().endsWith('.zip') || f.type.includes('zip')
+        );
+        if (zipFile) {
+          await handleZipFile(zipFile, isAutoProcessZip);
+          return;
+        }
+      }
+
       if (e.dataTransfer.items) {
         const items = Array.from(e.dataTransfer.items) as DataTransferItem[];
         const filesList: File[] = [];
@@ -179,6 +198,10 @@ export default function App() {
         const traverseEntry = async (entry: any) => {
           if (entry.isFile) {
             const file = await new Promise<File>((resolve, reject) => entry.file(resolve, reject));
+            if (file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip')) {
+              await handleZipFile(file, isAutoProcessZip);
+              return;
+            }
             if (file.type.startsWith('image/')) {
               filesList.push(file);
             }
@@ -207,17 +230,23 @@ export default function App() {
         }
 
         if (filesList.length > 0) {
+          sourceDirHandleRef.current = null;
+          setSourceFolderName('');
+          setZipFileName('');
           setImages(filesList);
           setCurrentImageIndex(0);
           setErrorMsg('');
           setSuccessMsg(`Đã nạp ${filesList.length} ảnh từ thư mục kéo thả!`);
           setTimeout(() => setSuccessMsg(''), 4000);
-        } else {
-          setErrorMsg('Không tìm thấy tệp ảnh hợp lệ trong dữ liệu kéo thả.');
+        } else if (!zipFileName) {
+          setErrorMsg('Không tìm thấy tệp ảnh hoặc file ZIP hợp lệ trong dữ liệu kéo thả.');
         }
       } else if (e.dataTransfer.files) {
         const selectedFiles = (Array.from(e.dataTransfer.files) as File[]).filter(file => file.type.startsWith('image/'));
         if (selectedFiles.length > 0) {
+          sourceDirHandleRef.current = null;
+          setSourceFolderName('');
+          setZipFileName('');
           setImages(selectedFiles);
           setCurrentImageIndex(0);
           setErrorMsg('');
@@ -226,7 +255,7 @@ export default function App() {
         }
       }
     } catch (err: any) {
-      setErrorMsg(`Lỗi kéo thả thư mục: ${err.message}`);
+      setErrorMsg(`Lỗi kéo thả: ${err.message}`);
     }
   };
 
@@ -266,6 +295,22 @@ export default function App() {
     }
   };
 
+  const updatePreviewForFile = async (file: File) => {
+    setIsPreviewLoading(true);
+    try {
+      const activeLogo = useDefaultLogo ? null : logo;
+      const blob = await processImage(file, activeLogo, position, opacity);
+      const url = URL.createObjectURL(blob);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = url;
+      setPreviewUrl(url);
+    } catch (e: any) {
+      setErrorMsg(`Lỗi khi tạo hình xem trước: ${e.message}`);
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
+
   const generatePreview = () => {
     if (images.length === 0) {
       setErrorMsg('Vui lòng chọn hoặc kéo thả ảnh vào ứng dụng trước khi xem trước!');
@@ -291,90 +336,17 @@ export default function App() {
     updatePreviewForIndex(prevIdx);
   };
 
-  const startProcessing = async () => {
-    if (images.length === 0) {
+  const startProcessingToZip = async (targetImages?: File[], sourceZipName?: string, customFolder?: string) => {
+    const fileList = targetImages || images;
+    if (fileList.length === 0) {
       setErrorMsg('Vui lòng nạp danh sách ảnh cần gắn logo!');
       return;
     }
 
-    if (exportMode === 'folder') {
-      await startProcessingToFolder();
-    } else {
-      await startProcessingToZip();
-    }
-  };
-
-  const startProcessingToFolder = async () => {
-    const parentDir = sourceDirHandleRef.current;
-    if (!parentDir) {
-      setErrorMsg('Không có quyền ghi vào thư mục gốc. Hãy chọn lại thư mục bằng nút "Chọn Thư Mục" hoặc chuyển sang chế độ tải ZIP.');
-      return;
-    }
-
     setProcessState({
       isProcessing: true,
       progress: 0,
-      total: images.length,
-      current: 0,
-      message: `Đang tạo thư mục daganlogo trong "${parentDir.name}"...`
-    });
-    setErrorMsg('');
-    setSuccessMsg('');
-
-    let success = 0;
-    const activeLogo = useDefaultLogo ? null : logo;
-
-    try {
-      // Tạo thư mục con "daganlogo" bên trong thư mục gốc
-      const outputDir = await parentDir.getDirectoryHandle('daganlogo', { create: true });
-
-      for (let i = 0; i < images.length; i++) {
-        const file = images[i];
-        const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
-        const outputName = `${nameWithoutExt}_watermarked.jpg`;
-
-        setProcessState(prev => ({
-          ...prev,
-          current: i + 1,
-          message: `Đang lưu [${i + 1}/${images.length}]: daganlogo/${outputName}`
-        }));
-
-        try {
-          const resultBlob = await processImage(file, activeLogo, position, opacity);
-          const fileHandle = await outputDir.getFileHandle(outputName, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(resultBlob);
-          await writable.close();
-          success++;
-        } catch (imgError: any) {
-          console.error(`Lỗi lưu ${file.name}:`, imgError);
-        }
-
-        setProcessState(prev => ({
-          ...prev,
-          progress: ((i + 1) / images.length) * 100
-        }));
-      }
-
-      setProcessState(prev => ({
-        ...prev,
-        isProcessing: false,
-        message: `Đã lưu ${success}/${images.length} ảnh vào "${parentDir.name}/daganlogo/"!`,
-        progress: 100,
-      }));
-
-      setSuccessMsg(`Đã lưu ${success} ảnh vào thư mục "${parentDir.name}/daganlogo/" (Opacity ${Math.round(opacity * 100)}%)`);
-    } catch (err: any) {
-      setErrorMsg(`Lỗi khi lưu vào thư mục: ${err.message}`);
-      setProcessState(prev => ({ ...prev, isProcessing: false }));
-    }
-  };
-
-  const startProcessingToZip = async () => {
-    setProcessState({
-      isProcessing: true,
-      progress: 0,
-      total: images.length,
+      total: fileList.length,
       current: 0,
       message: 'Khởi tạo tiến trình xử lý hàng loạt...'
     });
@@ -382,33 +354,45 @@ export default function App() {
     setSuccessMsg('');
 
     try {
+      const baseZip = sourceZipName 
+        ? sourceZipName.replace(/\.zip$/i, '') 
+        : (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'Images');
+      
+      const folderInsideZip = customFolder?.trim() || outputFolderName.trim() || baseZip;
+
       const zip = new JSZip();
-      const folder = zip.folder('daganlogo_DuongLV');
+      // Đặt tên thư mục bên trong file ZIP trùng với tên file ZIP hoặc tên người dùng đặt
+      const folder = zip.folder(folderInsideZip);
       if (!folder) throw new Error("Lỗi khi tạo gói lưu trữ ZIP");
 
       const activeLogo = useDefaultLogo ? null : logo;
+      const results: { name: string; blob: Blob }[] = [];
 
-      for (let i = 0; i < images.length; i++) {
-        const file = images[i];
+      for (let i = 0; i < fileList.length; i++) {
+        const file = fileList[i];
         setProcessState(prev => ({
           ...prev,
           current: i + 1,
-          message: `Đang gắn logo [${i + 1}/${images.length}]: ${file.name}`
+          message: `Đang gắn logo [${i + 1}/${fileList.length}]: ${file.name}`
         }));
 
         try {
           const resultBlob = await processImage(file, activeLogo, position, opacity);
           const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
-          folder.file(`${nameWithoutExt}_watermarked.jpg`, resultBlob);
+          const fileNameOut = `${nameWithoutExt}_watermarked.jpg`;
+          folder.file(fileNameOut, resultBlob);
+          results.push({ name: fileNameOut, blob: resultBlob });
         } catch (imgError: any) {
           console.error("Lỗi với một ảnh:", imgError);
         }
         
         setProcessState(prev => ({
           ...prev,
-          progress: ((i + 1) / images.length) * 100
+          progress: ((i + 1) / fileList.length) * 100
         }));
       }
+
+      setProcessedResults(results);
 
       setProcessState(prev => ({
         ...prev,
@@ -424,7 +408,13 @@ export default function App() {
         }
       });
       
-      saveAs(zipBlob, `Watermarked_Images_DuongLV_${Date.now()}.zip`);
+      const outputZipName = zipFileName 
+        ? `${baseZip}_watermarked.zip`
+        : `Watermarked_${baseZip}_DuongLV_${Date.now()}.zip`;
+      setCompletedZipBlob(zipBlob);
+      setCompletedZipName(outputZipName);
+
+      saveAs(zipBlob, outputZipName);
 
       setProcessState(prev => ({
         ...prev,
@@ -433,12 +423,295 @@ export default function App() {
         progress: 100,
       }));
 
-      setSuccessMsg(`Xuất ZIP thành công ${images.length} ảnh đã gắn logo bản quyền DuongLV (Độ mờ ${Math.round(opacity * 100)}%)!`);
+      setSuccessMsg(`✅ Đã tải về thành công ${fileList.length} ảnh trong thư mục "${folderInsideZip}"!`);
+      setTimeout(() => setSuccessMsg(''), 5000);
     } catch (err: any) {
       setErrorMsg(`Có lỗi xảy ra: ${err.message}`);
       setProcessState(prev => ({ ...prev, isProcessing: false }));
     }
   };
+
+  const handleZipFile = async (zipFile: File, autoProcess: boolean = isAutoProcessZip) => {
+    if (processState.isProcessing) return;
+
+    setErrorMsg('');
+    setSuccessMsg('');
+    
+    const baseName = zipFile.name.replace(/\.zip$/i, '');
+    setZipFileName(zipFile.name);
+    setOutputFolderName(baseName);
+
+    setProcessState({
+      isProcessing: true,
+      progress: 0,
+      total: 0,
+      current: 0,
+      message: `Đang mở file ZIP: "${zipFile.name}"...`
+    });
+
+    try {
+      const jszip = new JSZip();
+      const unzipped = await jszip.loadAsync(zipFile);
+
+      const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.svg'];
+      const validEntries: { name: string; relativePath: string; entry: JSZip.JSZipObject }[] = [];
+
+      unzipped.forEach((relativePath, entry) => {
+        if (entry.dir) return;
+        // Bỏ qua file ẩn & rác hệ thống (macOS __MACOSX, .DS_Store, Thumbs.db)
+        if (
+          relativePath.includes('__MACOSX') || 
+          relativePath.split('/').some(p => p.startsWith('.')) || 
+          relativePath.toLowerCase().endsWith('thumbs.db')
+        ) {
+          return;
+        }
+        const lower = relativePath.toLowerCase();
+        if (imageExtensions.some(ext => lower.endsWith(ext))) {
+          validEntries.push({
+            name: relativePath.split('/').pop() || relativePath,
+            relativePath,
+            entry
+          });
+        }
+      });
+
+      if (validEntries.length === 0) {
+        setErrorMsg(`File ZIP "${zipFile.name}" không chứa tệp ảnh hợp lệ (.jpg, .png, .webp...).`);
+        setProcessState(prev => ({ ...prev, isProcessing: false, message: '' }));
+        return;
+      }
+
+      setProcessState(prev => ({
+        ...prev,
+        total: validEntries.length,
+        message: `Đang trích xuất ${validEntries.length} ảnh từ "${zipFile.name}"...`
+      }));
+
+      const extractedFiles: File[] = [];
+      for (let i = 0; i < validEntries.length; i++) {
+        const { name, relativePath, entry } = validEntries[i];
+        const lower = name.toLowerCase();
+        let mimeType = 'image/jpeg';
+        if (lower.endsWith('.png')) mimeType = 'image/png';
+        else if (lower.endsWith('.webp')) mimeType = 'image/webp';
+        else if (lower.endsWith('.bmp')) mimeType = 'image/bmp';
+        else if (lower.endsWith('.gif')) mimeType = 'image/gif';
+        else if (lower.endsWith('.svg')) mimeType = 'image/svg+xml';
+
+        const blob = await entry.async('blob');
+        const imgFile = new File([blob], name, { type: mimeType });
+        (imgFile as any).zipPath = relativePath;
+        extractedFiles.push(imgFile);
+
+        setProcessState(prev => ({
+          ...prev,
+          current: i + 1,
+          progress: ((i + 1) / validEntries.length) * 25,
+          message: `Đang trích xuất [${i + 1}/${validEntries.length}]: ${name}`
+        }));
+      }
+
+      sourceDirHandleRef.current = null;
+      setSourceFolderName('');
+      setImages(extractedFiles);
+      setCurrentImageIndex(0);
+
+      // Cập nhật xem trước ngay cho ảnh đầu tiên
+      updatePreviewForFile(extractedFiles[0]);
+
+      if (autoProcess) {
+        setProcessState(prev => ({
+          ...prev,
+          message: `⚡ Tự động gán logo cho ${extractedFiles.length} ảnh trong "${zipFile.name}"...`
+        }));
+        await startProcessingToZip(extractedFiles, zipFile.name, baseName);
+      } else {
+        setProcessState(prev => ({ ...prev, isProcessing: false, message: '' }));
+        setSuccessMsg(`Đã nạp ${extractedFiles.length} ảnh từ "${zipFile.name}". Bấm "GẮN LOGO & TẢI VỀ" để xuất kết quả!`);
+        setTimeout(() => setSuccessMsg(''), 4000);
+      }
+    } catch (err: any) {
+      setErrorMsg(`Lỗi xử lý file ZIP: ${err.message || 'File ZIP không hợp lệ'}`);
+      setProcessState(prev => ({ ...prev, isProcessing: false, message: '' }));
+    }
+  };
+
+  const handleZipSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      await handleZipFile(file, isAutoProcessZip);
+      if (e.target.value) e.target.value = '';
+    }
+  };
+
+  const handleDownloadZip = async () => {
+    if (images.length === 0) {
+      setErrorMsg('Vui lòng nạp danh sách ảnh cần gắn logo!');
+      return;
+    }
+
+    const targetFolder = outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo');
+    await startProcessingToZip(images, zipFileName, targetFolder);
+  };
+
+  const startProcessing = handleDownloadZip;
+
+  const startProcessingToFolder = async (customFolder?: string) => {
+    const parentDir = sourceDirHandleRef.current;
+    if (!parentDir) {
+      setErrorMsg('Không có quyền ghi vào thư mục gốc. Hãy chọn lại thư mục bằng nút "Chọn Thư Mục" hoặc chuyển sang chế độ tải ZIP.');
+      return;
+    }
+
+    const targetDirName = customFolder?.trim() || outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo');
+
+    setProcessState({
+      isProcessing: true,
+      progress: 0,
+      total: images.length,
+      current: 0,
+      message: `Đang tạo thư mục "${targetDirName}" trong "${parentDir.name}"...`
+    });
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    let success = 0;
+    const activeLogo = useDefaultLogo ? null : logo;
+    const results: { name: string; blob: Blob }[] = [];
+
+    try {
+      // Tạo thư mục con trùng tên file ZIP (hoặc tên tùy chỉnh) bên trong thư mục gốc
+      const outputDir = await parentDir.getDirectoryHandle(targetDirName, { create: true });
+
+      for (let i = 0; i < images.length; i++) {
+        const file = images[i];
+        const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+        const outputName = `${nameWithoutExt}_watermarked.jpg`;
+
+        setProcessState(prev => ({
+          ...prev,
+          current: i + 1,
+          message: `Đang lưu [${i + 1}/${images.length}]: ${targetDirName}/${outputName}`
+        }));
+
+        try {
+          const resultBlob = await processImage(file, activeLogo, position, opacity);
+          const fileHandle = await outputDir.getFileHandle(outputName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(resultBlob);
+          await writable.close();
+          success++;
+          results.push({ name: outputName, blob: resultBlob });
+        } catch (imgError: any) {
+          console.error(`Lỗi lưu ${file.name}:`, imgError);
+        }
+
+        setProcessState(prev => ({
+          ...prev,
+          progress: ((i + 1) / images.length) * 100
+        }));
+      }
+
+      setProcessedResults(results);
+
+      setProcessState(prev => ({
+        ...prev,
+        isProcessing: false,
+        message: `Đã lưu ${success}/${images.length} ảnh vào "${parentDir.name}/${targetDirName}/"!`,
+        progress: 100,
+      }));
+
+      setSuccessMsg(`Đã lưu ${success} ảnh vào thư mục "${parentDir.name}/${targetDirName}/"!`);
+    } catch (err: any) {
+      setErrorMsg(`Lỗi khi lưu vào thư mục: ${err.message}`);
+      setProcessState(prev => ({ ...prev, isProcessing: false }));
+    }
+  };
+
+  const handleSaveToDownloads = async (folderNameOverride?: string) => {
+    if (images.length === 0) {
+      setErrorMsg('Vui lòng nạp danh sách ảnh cần gắn logo!');
+      return;
+    }
+
+    const targetName = folderNameOverride?.trim() || outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo');
+
+    if (!(window as any).showDirectoryPicker) {
+      // Fallback nếu trình duyệt không hỗ trợ File System Access API
+      await startProcessingToZip(images, zipFileName, targetName);
+      return;
+    }
+
+    try {
+      // Mở trình chọn thư mục mặc định tại Downloads của Windows
+      const parentDir = await (window as any).showDirectoryPicker({ 
+        mode: 'readwrite',
+        startIn: 'downloads'
+      });
+      
+      setProcessState({
+        isProcessing: true,
+        progress: 0,
+        total: images.length,
+        current: 0,
+        message: `Đang tạo thư mục "${targetName}" trong "${parentDir.name}"...`
+      });
+
+      const targetDirHandle = await parentDir.getDirectoryHandle(targetName, { create: true });
+
+      const activeLogo = useDefaultLogo ? null : logo;
+      const results: { name: string; blob: Blob }[] = [];
+      let success = 0;
+
+      for (let i = 0; i < images.length; i++) {
+        const file = images[i];
+        const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+        const fileNameOut = `${nameWithoutExt}_watermarked.jpg`;
+
+        setProcessState(prev => ({
+          ...prev,
+          current: i + 1,
+          progress: ((i + 1) / images.length) * 100,
+          message: `Đang gắn logo & lưu [${i + 1}/${images.length}]: ${targetName}/${fileNameOut}`
+        }));
+
+        try {
+          const blob = await processImage(file, activeLogo, position, opacity);
+          const fileHandle = await targetDirHandle.getFileHandle(fileNameOut, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          success++;
+          results.push({ name: fileNameOut, blob });
+        } catch (imgError: any) {
+          console.error(`Lỗi lưu ${file.name}:`, imgError);
+        }
+      }
+
+      setProcessedResults(results);
+
+      setProcessState(prev => ({
+        ...prev,
+        isProcessing: false,
+        progress: 100,
+        message: `Đã lưu thành công ${success} ảnh vào "${parentDir.name}/${targetName}/"!`
+      }));
+
+      setSuccessMsg(`✅ Đã tạo thư mục "${targetName}" trong "${parentDir.name}" và lưu ${success} ảnh!`);
+      setTimeout(() => setSuccessMsg(''), 5000);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        setProcessState(prev => ({ ...prev, isProcessing: false, message: '' }));
+        return;
+      }
+      setErrorMsg(`Lỗi khi tạo thư mục và lưu ảnh: ${err.message}`);
+      setProcessState(prev => ({ ...prev, isProcessing: false }));
+    }
+  };
+
+  const saveResultsToLocalDirectory = handleSaveToDownloads;
+
 
   const handleDownloadSingle = () => {
     if (!previewUrl) return;
@@ -491,6 +764,7 @@ export default function App() {
             <p className="text-sm font-medium tracking-wide">{successMsg}</p>
           </motion.div>
         )}
+
       </AnimatePresence>
 
       {/* Main Container */}
@@ -583,6 +857,13 @@ export default function App() {
             />
             <input 
               type="file" 
+              ref={zipInputRef} 
+              onChange={handleZipSelect} 
+              accept=".zip,application/zip,application/x-zip-compressed,multipart/x-zip"
+              className="hidden" 
+            />
+            <input 
+              type="file" 
               ref={logoInputRef} 
               onChange={handleLogoSelect} 
               accept="image/png, image/jpeg, image/webp" 
@@ -603,7 +884,13 @@ export default function App() {
                     </label>
                     {images.length > 0 && (
                       <button 
-                        onClick={() => { setImages([]); setPreviewUrl(null); sourceDirHandleRef.current = null; setSourceFolderName(''); }}
+                        onClick={() => { 
+                          setImages([]); 
+                          setPreviewUrl(null); 
+                          sourceDirHandleRef.current = null; 
+                          setSourceFolderName(''); 
+                          setZipFileName('');
+                        }}
                         disabled={processState.isProcessing}
                         className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 transition-colors disabled:opacity-50"
                       >
@@ -629,7 +916,11 @@ export default function App() {
                     <div className="flex flex-col gap-3">
                       <div className="flex items-center gap-3">
                         <div className={`p-2.5 rounded-xl transition-all ${images.length > 0 ? 'bg-cyan-500/20 text-cyan-300 shadow-[0_0_15px_rgba(0,240,255,0.3)]' : 'bg-slate-800 text-slate-400'}`}>
-                          <FileImage className="w-5 h-5" />
+                          {zipFileName ? (
+                            <FileArchive className="w-5 h-5 text-cyan-300" />
+                          ) : (
+                            <FileImage className="w-5 h-5" />
+                          )}
                         </div>
                         <div className="overflow-hidden flex-1">
                           <h4 className="font-semibold text-xs sm:text-sm text-slate-100 truncate">
@@ -639,14 +930,61 @@ export default function App() {
                             {images.length > 0 
                               ? sourceFolderName 
                                 ? `📁 ${sourceFolderName} (có quyền ghi) — ${images[currentImageIndex]?.name || ''}` 
-                                : `Đang xem: ${images[currentImageIndex]?.name || 'N/A'}`
-                              : 'Kéo thả thư mục hoặc chọn bên dưới'
+                                : zipFileName
+                                  ? `📦 ${zipFileName} — ${images[currentImageIndex]?.name || ''}`
+                                  : `Đang xem: ${images[currentImageIndex]?.name || 'N/A'}`
+                              : 'Kéo thả file ZIP, thư mục hoặc ảnh vào đây'
                             }
                           </p>
                         </div>
                       </div>
 
-                      {/* Browse Buttons Grid */}
+                      {/* ZIP Source Indicator Badge */}
+                      {zipFileName && (
+                        <div className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-cyan-950/40 border border-cyan-400/30">
+                          <div className="flex items-center gap-1.5 truncate text-[11px] font-mono text-cyan-300">
+                            <FileArchive className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                            <span className="truncate">Nguồn: {zipFileName}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => startProcessingToZip(images, zipFileName)}
+                            disabled={processState.isProcessing || images.length === 0}
+                            className="shrink-0 px-2 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-400/40 text-[10px] font-bold active:scale-95 disabled:opacity-50 flex items-center gap-1"
+                          >
+                            <Zap className="w-2.5 h-2.5 text-cyan-300" />
+                            Tải lại ZIP
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Primary ZIP Hero Button */}
+                      <button
+                        type="button"
+                        onClick={() => zipInputRef.current?.click()}
+                        disabled={processState.isProcessing}
+                        className="w-full relative overflow-hidden py-2.5 px-3.5 rounded-xl bg-gradient-to-r from-cyan-600/30 via-sky-600/30 to-fuchsia-600/30 hover:from-cyan-500/40 hover:via-sky-500/40 hover:to-fuchsia-500/40 border border-cyan-400/50 hover:border-cyan-300 text-cyan-200 text-xs font-bold flex items-center justify-between transition-all shadow-[0_0_20px_rgba(0,240,255,0.15)] active:scale-[0.99] disabled:opacity-50 group cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="p-1.5 rounded-lg bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 group-hover:scale-110 transition-transform shadow-[0_0_10px_rgba(0,240,255,0.3)]">
+                            <FileArchive className="w-4 h-4" />
+                          </div>
+                          <div className="text-left">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-slate-100 font-bold tracking-wide">Tải Lên File ZIP</span>
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/30 text-cyan-200 border border-cyan-400/40 font-mono font-semibold">
+                                TỰ ĐỘNG GÁN
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-cyan-300/70 font-normal">
+                              Tự động bung nén & gán logo ảnh trong file ZIP
+                            </div>
+                          </div>
+                        </div>
+                        <Zap className="w-4 h-4 text-cyan-400 group-hover:rotate-12 transition-transform" />
+                      </button>
+
+                      {/* Browse Buttons Grid (Folder & Files) */}
                       <div className="grid grid-cols-2 gap-2 pt-0.5">
                         <button
                           type="button"
@@ -667,6 +1005,29 @@ export default function App() {
                           Chọn Nhiều File
                         </button>
                       </div>
+
+                      {/* Auto-process ZIP Toggle Switch */}
+                      <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#060914] border border-cyan-500/20 text-[11px]">
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Tự động gán logo khi tải file ZIP:</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsAutoProcessZip(!isAutoProcessZip)}
+                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                            isAutoProcessZip ? 'bg-cyan-500 shadow-[0_0_10px_rgba(0,240,255,0.5)]' : 'bg-slate-700'
+                          }`}
+                          title={isAutoProcessZip ? 'Đang bật: Tự động gán logo & xuất ZIP ngay' : 'Đang tắt: Nạp ảnh vào hàng đợi xem trước'}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                              isAutoProcessZip ? 'translate-x-4' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
                     </div>
                   </div>
                 </div>
@@ -973,53 +1334,41 @@ export default function App() {
 
               </div>
 
-              {/* SECTION 5: Chế Độ Xuất & Nút Xử Lý */}
+              {/* SECTION 5: Gắn Logo & Tải Về Trọn Gói 1-Chạm */}
               <div className="pt-3 border-t border-cyan-500/20 space-y-3">
-
-                {/* Export Mode Toggle */}
-                <div className="space-y-2">
+                <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-sky-400 tracking-wider uppercase flex items-center gap-2 font-mono">
-                    <FolderOutput className="w-4 h-4 text-sky-400" />
-                    5. Chế Độ Lưu
+                    <Zap className="w-4 h-4 text-cyan-400 fill-cyan-400" />
+                    5. Xuất Thành Phẩm (1-Click)
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setExportMode('folder')}
-                      disabled={processState.isProcessing}
-                      className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border ${
-                        exportMode === 'folder'
-                          ? 'bg-sky-500/20 text-sky-300 border-sky-400/50 shadow-[0_0_15px_rgba(14,165,233,0.3)] font-bold'
-                          : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-white hover:bg-slate-700'
-                      } disabled:opacity-50`}
-                    >
-                      <FolderDown className="w-4 h-4" />
-                      <div className="text-left">
-                        <div>Lưu Vào Thư Mục</div>
-                        <div className={`text-[10px] font-normal mt-0.5 ${
-                          exportMode === 'folder' ? 'text-sky-400/70' : 'text-slate-500'
-                        }`}>Ghi file .jpg trực tiếp</div>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setExportMode('zip')}
-                      disabled={processState.isProcessing}
-                      className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border ${
-                        exportMode === 'zip'
-                          ? 'bg-sky-500/20 text-sky-300 border-sky-400/50 shadow-[0_0_15px_rgba(14,165,233,0.3)] font-bold'
-                          : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-white hover:bg-slate-700'
-                      } disabled:opacity-50`}
-                    >
-                      <Archive className="w-4 h-4" />
-                      <div className="text-left">
-                        <div>Tải File ZIP</div>
-                        <div className={`text-[10px] font-normal mt-0.5 ${
-                          exportMode === 'zip' ? 'text-sky-400/70' : 'text-slate-500'
-                        }`}>Đóng gói & download</div>
-                      </div>
-                    </button>
+                  {zipFileName && (
+                    <span className="text-[10px] text-cyan-300 font-mono bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
+                      ⚡ Theo ZIP: {zipFileName}
+                    </span>
+                  )}
+                </div>
+
+                {/* Tên thư mục lưu thành phẩm */}
+                <div className="p-3 rounded-2xl bg-[#070b1a] border border-cyan-500/20 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-300 font-mono font-medium flex items-center gap-1.5">
+                      <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
+                      Tên thư mục lưu trữ ảnh:
+                    </span>
+                    <span className="text-[10px] text-cyan-400 font-mono font-semibold">
+                      /{outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo')}/
+                    </span>
                   </div>
+                  <input
+                    type="text"
+                    value={outputFolderName}
+                    onChange={(e) => setOutputFolderName(e.target.value)}
+                    placeholder={zipFileName ? zipFileName.replace(/\.zip$/i, '') : "daganlogo"}
+                    className="w-full bg-[#0d142c] border border-slate-700/80 focus:border-cyan-400 rounded-xl px-3 py-2 text-xs text-cyan-200 font-mono focus:outline-none transition-colors"
+                  />
+                  <p className="text-[10px] text-slate-500 font-mono">
+                    💡 Toàn bộ ảnh gắn logo sẽ được lưu vào thư mục này bên trong file tải về.
+                  </p>
                 </div>
                 
                 {/* Progress Indicator */}
@@ -1043,42 +1392,61 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Big Neon Action Button */}
-                <button 
-                  onClick={startProcessing}
-                  disabled={processState.isProcessing || images.length === 0}
-                  className={`w-full relative overflow-hidden group py-4 px-6 rounded-2xl text-white font-extrabold text-base tracking-wider transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:hover:scale-100 disabled:shadow-none flex items-center justify-center gap-3 border border-white/20 cursor-pointer ${
-                    exportMode === 'folder'
-                      ? 'bg-gradient-to-r from-sky-500 via-blue-600 to-cyan-500 hover:from-sky-400 hover:via-blue-500 hover:to-cyan-400 shadow-[0_0_30px_rgba(14,165,233,0.4),0_0_60px_rgba(0,240,255,0.2)]'
-                      : 'bg-gradient-to-r from-cyan-500 via-blue-600 to-fuchsia-600 hover:from-cyan-400 hover:via-blue-500 hover:to-fuchsia-500 shadow-[0_0_30px_rgba(0,240,255,0.4),0_0_60px_rgba(217,70,239,0.2)]'
-                  }`}
-                >
-                  {/* Animated Shine bar */}
-                  <div className="absolute top-0 bottom-0 w-24 bg-gradient-to-r from-transparent via-white/40 to-transparent skew-x-[-25deg] animate-shine pointer-events-none" />
+                {/* 2 NÚT BẤM CHÍNH XÁC THEO YÊU CẦU */}
+                <div className="space-y-2.5 pt-1">
+                  {/* NÚT 1: TẢI FILE ZIP */}
+                  <button 
+                    onClick={handleDownloadZip}
+                    disabled={processState.isProcessing || images.length === 0}
+                    className="w-full relative overflow-hidden group py-3.5 px-5 rounded-2xl text-white font-bold text-sm tracking-wide transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:hover:scale-100 flex items-center justify-between border border-cyan-400/40 cursor-pointer bg-gradient-to-r from-cyan-500 via-sky-600 to-blue-600 hover:from-cyan-400 hover:via-sky-500 hover:to-blue-500 shadow-[0_0_25px_rgba(0,240,255,0.3)]"
+                  >
+                    <div className="absolute top-0 bottom-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-[-25deg] animate-shine pointer-events-none" />
+                    
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-xl bg-white/20 text-white shadow-inner">
+                        <Archive className="w-5 h-5" />
+                      </div>
+                      <div className="text-left">
+                        <div className="font-extrabold text-sm tracking-wider flex items-center gap-1.5">
+                          <span>1. TẢI FILE ZIP</span>
+                          <span className="text-xs font-mono font-normal opacity-90">({images.length} ảnh)</span>
+                        </div>
+                        <div className="text-[10px] text-cyan-100 font-normal font-mono">
+                          Đóng gói thư mục /{outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo')}/ vào file ZIP
+                        </div>
+                      </div>
+                    </div>
+                    <Download className="w-5 h-5 text-cyan-200 group-hover:translate-y-0.5 transition-transform" />
+                  </button>
 
-                  <div className="p-1 rounded-full bg-white/20">
-                    {exportMode === 'folder'
-                      ? <FolderDown className="w-5 h-5 text-white" />
-                      : <Zap className="w-5 h-5 text-white fill-white" />
-                    }
-                  </div>
-                  <span className="drop-shadow-md">
-                    {processState.isProcessing 
-                      ? 'ĐANG XỬ LÝ HÀNG LOẠT...' 
-                      : exportMode === 'folder'
-                        ? `LƯU VÀO THƯ MỤC (${images.length} ẢNH)`
-                        : `TẢI ZIP (${images.length} ẢNH)`
-                    }
-                  </span>
-                </button>
+                  {/* NÚT 2: TẢI VỀ THƯ MỤC DOWNLOADS CỦA WINDOWS */}
+                  <button 
+                    onClick={() => handleSaveToDownloads()}
+                    disabled={processState.isProcessing || images.length === 0}
+                    className="w-full relative overflow-hidden group py-3.5 px-5 rounded-2xl text-white font-bold text-sm tracking-wide transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:hover:scale-100 flex items-center justify-between border border-fuchsia-400/40 cursor-pointer bg-gradient-to-r from-blue-600 via-indigo-600 to-fuchsia-600 hover:from-blue-500 hover:via-indigo-500 hover:to-fuchsia-500 shadow-[0_0_25px_rgba(217,70,239,0.3)]"
+                  >
+                    <div className="absolute top-0 bottom-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-[-25deg] animate-shine pointer-events-none" />
+
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-xl bg-white/20 text-white shadow-inner">
+                        <FolderDown className="w-5 h-5" />
+                      </div>
+                      <div className="text-left">
+                        <div className="font-extrabold text-sm tracking-wider flex items-center gap-1.5">
+                          <span>2. TẢI VỀ THƯ MỤC DOWNLOADS</span>
+                          <span className="text-xs font-mono font-normal opacity-90">({images.length} ảnh)</span>
+                        </div>
+                        <div className="text-[10px] text-fuchsia-100 font-normal font-mono">
+                          Tạo thư mục /{outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo')}/ trong Downloads
+                        </div>
+                      </div>
+                    </div>
+                    <FolderDown className="w-5 h-5 text-fuchsia-200 group-hover:translate-y-0.5 transition-transform" />
+                  </button>
+                </div>
 
                 <p className="text-center text-[11px] text-slate-500 font-mono">
-                  {exportMode === 'folder' 
-                    ? sourceFolderName 
-                      ? `📁 Lưu vào: ${sourceFolderName}/daganlogo/ — tự động tạo thư mục con`
-                      : '📁 Chọn thư mục ảnh gốc → tạo thư mục daganlogo/ & ghi file vào đó'
-                    : '⚡ Tự động đóng gói ZIP & chèn thẻ EXIF Author: DuongLV'
-                  }
+                  💡 Nút 1 tải file nén ZIP • Nút 2 tạo thư mục giống tên file ZIP & lưu trực tiếp vào Downloads
                 </p>
               </div>
 
@@ -1125,7 +1493,14 @@ export default function App() {
               </div>
 
               {/* High-Tech Preview Canvas Viewport */}
-              <div className="flex-1 min-h-[380px] bg-[#04060d] rounded-2xl border border-cyan-500/30 flex items-center justify-center p-4 relative overflow-hidden shadow-[inset_0_0_30px_rgba(0,0,0,0.8)]">
+              <div 
+                onDragOver={(e) => { e.preventDefault(); setIsDragOverImages(true); }}
+                onDragLeave={() => setIsDragOverImages(false)}
+                onDrop={handleImagesDrop}
+                className={`flex-1 min-h-[380px] bg-[#04060d] rounded-2xl border transition-all duration-300 flex items-center justify-center p-4 relative overflow-hidden shadow-[inset_0_0_30px_rgba(0,0,0,0.8)] ${
+                  isDragOverImages ? 'border-cyan-400 shadow-[0_0_35px_rgba(0,240,255,0.3)]' : 'border-cyan-500/30'
+                }`}
+              >
                 
                 {/* Cyber Corner Crosshairs */}
                 <div className="absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
@@ -1166,18 +1541,30 @@ export default function App() {
                       <h4 className="font-bold text-slate-200 text-base">
                         Chưa có ảnh xem trước
                       </h4>
-                      <p className="text-xs text-slate-400 leading-relaxed">
-                        Hãy nạp thư mục ảnh ở cột bên trái và nhấn <span className="text-cyan-300 font-semibold">'Xem trước ngẫu nhiên'</span> để kiểm tra vị trí & độ trong suốt logo trước khi xuất hàng loạt.
+                      <p className="text-xs text-slate-400 leading-relaxed max-w-sm">
+                        Kéo thả file ZIP, thư mục ảnh hoặc nhấn <span className="text-cyan-300 font-semibold">'Tải Lên File ZIP'</span> bên trái để tự động giải nén & đóng dấu logo hàng loạt.
                       </p>
                     </div>
-                    {images.length > 0 && (
+                    <div className="flex items-center justify-center gap-2 mt-2">
                       <button
-                        onClick={generatePreview}
-                        className="mt-2 px-4 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-300 text-xs font-bold tracking-wide transition-all shadow-[0_0_15px_rgba(0,240,255,0.2)]"
+                        type="button"
+                        onClick={() => zipInputRef.current?.click()}
+                        disabled={processState.isProcessing}
+                        className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500/20 via-sky-500/20 to-fuchsia-500/20 hover:from-cyan-500/30 hover:to-fuchsia-500/30 border border-cyan-400/40 text-cyan-300 text-xs font-bold tracking-wide transition-all shadow-[0_0_15px_rgba(0,240,255,0.2)] flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
                       >
-                        Tạo xem trước ngay
+                        <FileArchive className="w-3.5 h-3.5 text-cyan-400" />
+                        Chọn File ZIP Ngay
                       </button>
-                    )}
+                      {images.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={generatePreview}
+                          className="px-4 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-300 text-xs font-bold tracking-wide transition-all shadow-[0_0_15px_rgba(0,240,255,0.2)]"
+                        >
+                          Tạo xem trước ngay
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

@@ -102,6 +102,7 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.logo_path = ""
         self.image_files = []
         self.use_default_logo = True
+        self.archive_base_name = ""
         
         # Cấu hình grid bố cục chính
         self.grid_columnconfigure(0, weight=1)
@@ -158,6 +159,19 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.btn_browse_archive = ctk.CTkButton(self.left_panel, text="📦 Chọn File Nén (.ZIP, .RAR)", command=self.browse_archive, height=40, fg_color="#1E3438", hover_color="#233D42", text_color="#3AD9DC", font=("Arial", 13, "bold"))
         self.btn_browse_archive.pack(pady=(5, 5), padx=25, fill="x")
+
+        # Tùy chọn tự động gán logo khi nạp file nén
+        self.auto_watermark_zip_var = ctk.BooleanVar(value=True)
+        self.chk_auto_zip = ctk.CTkCheckBox(
+            self.left_panel,
+            text="⚡ Tự động gán logo khi nạp file nén",
+            variable=self.auto_watermark_zip_var,
+            font=("Arial", 11),
+            text_color="#3AD9DC",
+            fg_color="#00F0FF",
+            hover_color="#00C4D4"
+        )
+        self.chk_auto_zip.pack(pady=(2, 6), padx=25, anchor="w")
         
         self.lbl_folder_info = ctk.CTkLabel(self.left_panel, text="Chưa chọn thư mục hoặc file nén", text_color="gray50", font=("Arial", 12), wraplength=320)
         self.lbl_folder_info.pack(pady=(0, 10), padx=25, anchor="w")
@@ -209,9 +223,22 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.slider_opacity.set(60)
         self.slider_opacity.pack(pady=(2, 10), padx=25, fill="x")
         
+        # 4. Tùy chỉnh Tên thư mục lưu kết quả (tự động theo tên ZIP/thư mục)
+        ctk.CTkLabel(self.left_panel, text="📁 Tên thư mục con lưu kết quả:", font=("Arial", 12, "bold")).pack(pady=(6, 2), padx=25, anchor="w")
+        self.output_folder_var = ctk.StringVar(value="daganlogo")
+        self.output_folder_entry = ctk.CTkEntry(
+            self.left_panel,
+            textvariable=self.output_folder_var,
+            placeholder_text="Tên thư mục con (VD: daganlogo, Ten_File_Zip...)",
+            height=36,
+            fg_color="#1E1E1E",
+            border_color="#00F0FF"
+        )
+        self.output_folder_entry.pack(pady=(0, 8), padx=25, fill="x")
+
         # Nút Xem trước (Preview chủ động)
         self.btn_preview = ctk.CTkButton(self.left_panel, text="Xem trước kết quả", command=self.generate_preview, fg_color="#3D3D3D", hover_color="#4D4D4D", height=40, font=("Arial", 13))
-        self.btn_preview.pack(pady=(20, 10), padx=25, fill="x")
+        self.btn_preview.pack(pady=(15, 10), padx=25, fill="x")
         
         # Progress Bar
         self.lbl_progress = ctk.CTkLabel(self.left_panel, text="", font=("Arial", 12))
@@ -422,6 +449,9 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         folder = filedialog.askdirectory(title="Chọn Thư mục chứa ảnh gốc")
         if folder:
             self.folder_path = folder
+            self.archive_base_name = ""
+            if hasattr(self, 'output_folder_var') and not self.output_folder_var.get().strip():
+                self.output_folder_var.set("daganlogo")
             valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
             self.image_files = [f for f in os.listdir(folder) if f.lower().endswith(valid_exts)]
             if self.image_files:
@@ -446,6 +476,9 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         
         try:
             base_name = os.path.splitext(archive_name)[0]
+            self.archive_base_name = base_name
+            if hasattr(self, 'output_folder_var'):
+                self.output_folder_var.set(base_name)
             extract_dir = os.path.join(os.path.dirname(os.path.abspath(archive_path)), f"{base_name}_extracted")
             os.makedirs(extract_dir, exist_ok=True)
             
@@ -500,6 +533,11 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self.folder_path = extract_dir
                 self.image_files = all_images
                 self.lbl_folder_info.configure(text=f"Đã bung nén: {len(all_images)} ảnh ({archive_name})", text_color="#3AD9DC")
+                
+                # Tự động bắt đầu gắn logo nếu tùy chọn được bật
+                if getattr(self, 'auto_watermark_zip_var', None) and self.auto_watermark_zip_var.get():
+                    self.lbl_folder_info.configure(text=f"Đã bung nén {len(all_images)} ảnh. Tự động gắn logo...", text_color="#00F0FF")
+                    self.after(500, self.start_processing)
             else:
                 self.lbl_folder_info.configure(text="File nén không chứa hình ảnh hợp lệ!", text_color="#FF5F56")
                 self.image_files = []
@@ -653,8 +691,9 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         threading.Thread(target=self.process_images_thread, daemon=True).start()
 
     def process_images_thread(self):
-        # 1. Tự động tạo thư mục con [daganlogo]
-        output_dir = os.path.join(self.folder_path, "daganlogo")
+        # 1. Tự động tạo thư mục con (theo tên ZIP hoặc daganlogo)
+        target_folder = self.output_folder_var.get().strip() if hasattr(self, 'output_folder_var') and self.output_folder_var.get().strip() else (getattr(self, 'archive_base_name', None) or "daganlogo")
+        output_dir = os.path.join(self.folder_path, target_folder)
         os.makedirs(output_dir, exist_ok=True)
         
         total = len(self.image_files)
@@ -686,7 +725,8 @@ class WatermarkApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.progressbar.set(current / total)
 
     def finish_processing(self, success, total, output_dir):
-        self.lbl_progress.configure(text=f"Hoàn thành xuất sắc! Đã lưu {success}/{total} ảnh.")
+        folder_name = os.path.basename(output_dir)
+        self.lbl_progress.configure(text=f"Hoàn thành xuất sắc! Đã lưu {success}/{total} ảnh vào thư mục '{folder_name}'.")
         
         # Mở khóa giao diện
         self.btn_start.configure(state="normal", fg_color="#EE6721", text="Gắn logo")
