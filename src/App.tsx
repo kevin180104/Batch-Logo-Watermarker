@@ -1392,34 +1392,8 @@ export default function App() {
                   </div>
                 )}
 
-                {/* 2 NÚT BẤM CHÍNH XÁC THEO YÊU CẦU */}
+                {/* NÚT XUẤT THÀNH PHẨM: TẢI VỀ THƯ MỤC DOWNLOADS */}
                 <div className="space-y-2.5 pt-1">
-                  {/* NÚT 1: TẢI FILE ZIP */}
-                  <button 
-                    onClick={handleDownloadZip}
-                    disabled={processState.isProcessing || images.length === 0}
-                    className="w-full relative overflow-hidden group py-3.5 px-5 rounded-2xl text-white font-bold text-sm tracking-wide transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:hover:scale-100 flex items-center justify-between border border-cyan-400/40 cursor-pointer bg-gradient-to-r from-cyan-500 via-sky-600 to-blue-600 hover:from-cyan-400 hover:via-sky-500 hover:to-blue-500 shadow-[0_0_25px_rgba(0,240,255,0.3)]"
-                  >
-                    <div className="absolute top-0 bottom-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-[-25deg] animate-shine pointer-events-none" />
-                    
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-xl bg-white/20 text-white shadow-inner">
-                        <Archive className="w-5 h-5" />
-                      </div>
-                      <div className="text-left">
-                        <div className="font-extrabold text-sm tracking-wider flex items-center gap-1.5">
-                          <span>1. TẢI FILE ZIP</span>
-                          <span className="text-xs font-mono font-normal opacity-90">({images.length} ảnh)</span>
-                        </div>
-                        <div className="text-[10px] text-cyan-100 font-normal font-mono">
-                          Đóng gói thư mục /{outputFolderName.trim() || (zipFileName ? zipFileName.replace(/\.zip$/i, '') : 'daganlogo')}/ vào file ZIP
-                        </div>
-                      </div>
-                    </div>
-                    <Download className="w-5 h-5 text-cyan-200 group-hover:translate-y-0.5 transition-transform" />
-                  </button>
-
-                  {/* NÚT 2: TẢI VỀ THƯ MỤC DOWNLOADS CỦA WINDOWS */}
                   <button 
                     onClick={() => handleSaveToDownloads()}
                     disabled={processState.isProcessing || images.length === 0}
@@ -1433,7 +1407,7 @@ export default function App() {
                       </div>
                       <div className="text-left">
                         <div className="font-extrabold text-sm tracking-wider flex items-center gap-1.5">
-                          <span>2. TẢI VỀ THƯ MỤC DOWNLOADS</span>
+                          <span>TẢI VỀ THƯ MỤC DOWNLOADS</span>
                           <span className="text-xs font-mono font-normal opacity-90">({images.length} ảnh)</span>
                         </div>
                         <div className="text-[10px] text-fuchsia-100 font-normal font-mono">
@@ -1446,7 +1420,7 @@ export default function App() {
                 </div>
 
                 <p className="text-center text-[11px] text-slate-500 font-mono">
-                  💡 Nút 1 tải file nén ZIP • Nút 2 tạo thư mục giống tên file ZIP & lưu trực tiếp vào Downloads
+                  💡 Tự động tạo thư mục giống tên file ZIP & lưu trực tiếp ảnh vào Downloads
                 </p>
               </div>
 
